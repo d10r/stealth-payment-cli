@@ -89,11 +89,11 @@ bun cli.ts scan
 Claim ETH from a **stealth address** and transfer it to your wallet.
 
 ```sh
-bun cli.ts claim -s <stealth-address> -e <ephemeral-pubkey>
+bun cli.ts claim -s <stealth-address>
 ```
 Example:
 ```sh
-bun cli.ts claim -s 0x5678...1234 -e 0xabcd...efgh
+bun cli.ts claim -s 0x5678...1234
 ```
 
 ## ⚠️ Security Considerations

@@ -387,6 +387,94 @@ program
     .description("Scan for deposits that can be claimed")
     .action(scanDeposits);
 
+program
+    .command("claim")
+    .description("Claim funds using the public relayer")
+    .requiredOption("-s, --stealth <address>", "Stealth address to claim funds from")
+    .action(async (options: { stealth: string }) => {
+        await ensureSetup();
+
+        // Get the RELAYER_API_URL from environment
+        const RELAYER_API_URL = process.env.RELAYER_API_URL || "http://main.superfluid.dev:4269";
+        if (!RELAYER_API_URL) {
+            console.error("Missing required environment variable: RELAYER_API_URL");
+            process.exit(1);
+        }
+
+        // Fetch the ephemeral public key from the relayer
+        console.log("Fetching ephemeral public key from relayer...");
+        const response = await fetch(`${RELAYER_API_URL}/pubkey/${options.stealth}`);
+        if (!response.ok) {
+            console.error("Failed to fetch ephemeral public key:", await response.text());
+            process.exit(1);
+        }
+        const { ephemeralPublicKey } = await response.json();
+
+        // Get chainId from the connected RPC
+        const network = await provider.getNetwork();
+        const chainId = network.chainId;
+
+        // Get receiver address from the signer wallet
+        const receiver = await signer.getAddress();
+
+        // Compute shared secret using the recipient's private key and provided ephemeral public key
+        const sharedSecret = secp.secp256k1.getSharedSecret(
+            ethers.getBytes(signer.privateKey),
+            ethers.getBytes(ephemeralPublicKey)
+        );
+
+        // Derive stealth private key
+        const hashedSecret = ethers.keccak256(sharedSecret);
+        const scalar = BigInt("0x" + hashedSecret.slice(2)) % secp.secp256k1.CURVE.n;
+        const recipientPrivKeyHex = signer.privateKey.startsWith("0x")
+            ? signer.privateKey
+            : "0x" + signer.privateKey;
+        const recipientPrivKeyBigInt = BigInt(recipientPrivKeyHex);
+        const stealthPrivateKey = (recipientPrivKeyBigInt + scalar) % secp.secp256k1.CURVE.n;
+        const stealthPrivateKeyHex = "0x" + stealthPrivateKey.toString(16).padStart(64, "0");
+
+        // Create stealth wallet (only for signing)
+        const stealthWallet = new ethers.Wallet(stealthPrivateKeyHex);
+
+        // Optionally verify that the derived stealth address matches the provided one
+        const derivedStealthAddress = await stealthWallet.getAddress();
+        console.log("Derived Stealth Address:", derivedStealthAddress);
+        if (derivedStealthAddress.toLowerCase() !== options.stealth.toLowerCase()) {
+            console.warn("Warning: Derived stealth address does not match the provided stealth address.");
+        }
+
+        // Compute signature: sign a message hash computed over [receiver, stealthAddress]
+        const messageHash = ethers.keccak256(
+            ethers.solidityPacked(
+                ["address", "address"],
+                [receiver, options.stealth]
+            )
+        );
+        const signature = await stealthWallet.signMessage(ethers.getBytes(messageHash));
+
+        console.log("Sending claim request to relayer at", RELAYER_API_URL);
+        const responseClaim = await fetch(`${RELAYER_API_URL}/claim`, {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({
+                chainId: Number(chainId),
+                stealthAddress: options.stealth,
+                signature,
+                receiver
+            })
+        });
+
+        if (!responseClaim.ok) {
+            console.error("Claim request failed with status", responseClaim.status);
+            const err = await responseClaim.json();
+            console.error("Error:", err);
+            process.exit(1);
+        }
+
+        const result = await responseClaim.json();
+        console.log("Claim successful:", result);
+    });
+
 program.parse(process.argv);
 if (!process.argv.slice(2).length) {
     program.outputHelp();
